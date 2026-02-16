@@ -6,6 +6,7 @@ const fs = require('fs');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
+
 /* uuid */
 function uuidv4() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -22,6 +23,14 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.m4a')) {
+      res.setHeader('Content-Type', 'audio/m4a');
+    }
+  }
+}));
+
 
 /* client ip */
 app.use((req, res, next) => {
@@ -36,26 +45,29 @@ app.use((req, res, next) => {
 
 /* mongodb */
 mongoose.connect(
-  process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/BoundingBoxers'
-);
+  process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/BoundingBoxers')
+  .then(() => console.log("MongoDB connected"))
+  .catch(err => console.log("MongoDB error", err));
 
 /* schema */
 const dataSchema = new mongoose.Schema({
-  ipAddress: { type: String, required: true, unique: true },
+  ipAddress: { type: String, required: true },
   sessionId: String,
+
   location: { latitude: Number, longitude: Number },
-  accelerometer: [{
-    x: Number,
-    y: Number,
-    z: Number,
-    timestamp: { type: Date, default: Date.now }
-  }],
-  gyroscope: [{
-    alpha: Number,
-    beta: Number,
-    gamma: Number,
-    timestamp: { type: Date, default: Date.now }
-  }],
+
+  //unified motion samples
+  motionSamples:[[{
+    t: { type: Number, required: true },   // timestamp in ms/seconds from client
+    ax: Number,
+    ay: Number,
+    az: Number,
+    gx: Number,
+    gy: Number,
+    gz: Number
+  }]],
+
+  //  audio section untouched
   audioFiles: [{
     filename: String,
     storedName: String,
@@ -65,9 +77,14 @@ const dataSchema = new mongoose.Schema({
     dangerIndex: Number,
     timestamp: { type: Date, default: Date.now }
   }],
+
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
+
+
+//Indexing the data entries
+dataSchema.index({ ipAddress: 1 });
 
 const Data = mongoose.model('Data', dataSchema);
 
@@ -75,14 +92,13 @@ const Data = mongoose.model('Data', dataSchema);
 const uploadsDir = process.env.UPLOADS_DIR || './uploads';
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
-let audioCounter = 0;
+// let audioCounter = 0;
 
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, uploadsDir),
   filename: (_, file, cb) => {
-    audioCounter += 1;
     const ext = path.extname(file.originalname) || '.mp4';
-    cb(null, `audio${audioCounter}${ext}`);
+    cb(null, `${uuidv4()}${ext}`);
   }
 });
 
@@ -108,9 +124,11 @@ app.post('/panic', upload.single('audio'), async (req, res) => {
   try {
     const ipAddress = req.clientIp;
 
-    const latitude = Number(req.body.latitude);
-    const longitude = Number(req.body.longitude);
-    const samples = JSON.parse(req.body.samples || '[]');
+    // const latitude = Number(req.body.latitude);
+    // const longitude = Number(req.body.longitude);
+    // parse incoming JSON
+    const samples = [JSON.parse(req.body.samples || '[]')];
+
 
     let dangerIndex = 0;
     let audioEntry = null;
@@ -133,8 +151,9 @@ app.post('/panic', upload.single('audio'), async (req, res) => {
       {
         ipAddress,
         sessionId: uuidv4(),
-        location: { latitude, longitude },
+        // location: { latitude, longitude },
         ...(audioEntry && { $push: { audioFiles: audioEntry } }),
+        ...(samples.length && { $push: { motionSamples: samples } }),
         $set: { updatedAt: new Date() },
         $setOnInsert: { createdAt: new Date() }
       },
@@ -148,11 +167,13 @@ app.post('/panic', upload.single('audio'), async (req, res) => {
       dangerIndex: Number(dangerIndex.toFixed(2))
     });
 
-    if (req.file) {
-      setTimeout(() => {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      }, 600000);
-    }
+    //This delets the audio file after 10 mins
+
+    // if (req.file) {
+    //   setTimeout(() => {
+    //     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    //   }, 600000);
+    // }
 
   } catch (err) {
     console.error(err);
@@ -176,6 +197,27 @@ app.get('/api/data', async (req, res) => {
     updatedAt: data.updatedAt
   });
 });
+
+/* stream audio */
+app.get("/audio/:filename", async (req, res) => {
+  try {
+    const file = await gfs.files.findOne({ filename: req.params.filename });
+
+    if (!file) {
+      return res.status(404).json({ message: "File not found" });
+    }
+
+    //set correct content type
+    res.set("Content-Type", file.contentType);
+
+    const readStream = gfs.createReadStream(file.filename);
+    readStream.pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 /* start */
 app.listen(PORT, () => {
