@@ -19,6 +19,8 @@ function uuidv4() {
 /* app */
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'example';
+app.set("trust proxy", 1);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json({ limit: '50mb' }));
@@ -51,7 +53,7 @@ mongoose.connect(
 
 /* schema */
 const dataSchema = new mongoose.Schema({
-  ipAddress: { type: String, required: true },
+  userId: { type: String, required: true },
   sessionId: String,
 
   location: { latitude: Number, longitude: Number },
@@ -81,12 +83,102 @@ const dataSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limit each IP to 5 requests per window
+  message: { message: 'Too many attempts, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const logsignSchema = Joi.object({
+  username: Joi.string().alphanum().min(3).max(30).required(),
+  password: Joi.string().min(6).max(128).required()
+});
+const userSchema = new mongoose.Schema({
+  userId: String,
+  username: String,
+  passwordHash: String
+});
 
 
 //Indexing the data entries
-dataSchema.index({ ipAddress: 1 });
+dataSchema.index({ userId: 1 });
 
+const User = mongoose.model('User', userSchema);
 const Data = mongoose.model('Data', dataSchema);
+
+app.get('/ping', (req, res) => {
+  res.status(200).json({ message: 'pong' });
+});
+
+app.post('/login', authLimiter, async (req, res) => {
+  const {error} = logsignSchema.validate(req.body);
+  if (error) return res.status(400).json({ message: error.details[0].message });
+  const { username, password } = req.body;
+
+  try {
+    const user = await User.findOne({ username });
+
+    if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign({ userId: user.userId }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.post('/signup', authLimiter, async (req, res) => {
+  const {error} = logsignSchema.validate(req.body);
+  if (error) return res.status(400).json({ message: error.details[0].message });
+  const { username, password } = req.body;
+
+  if (!username || !password)
+    return res.status(400).json({ message: 'Username and password required' });
+
+  if (await User.findOne({ username }))
+    return res.status(409).json({ message: 'Username already taken' });
+
+  const passwordHash = await bcrypt.hash(password, 8);
+  const userId = `user${Date.now()}`;
+
+  const newUser = new User({ userId, username, passwordHash });
+  await newUser.save();
+
+  // const newTodo = new Todo({ userId: userId, tasks: {}, comptasks: {} });
+  // await newTodo.save();
+
+  const token = jwt.sign({ userId: userId }, JWT_SECRET, { expiresIn: '7d' });
+  res.status(201).json({ token });
+});
+
+app.get('/whoami', authenticateToken, async (req, res) => {
+  const user = await User.findOne({ id: req.userId });
+  if (!user) return res.status(404).json({ message: 'invalid token' });
+
+  res.send({ id: user.id, username: user.username });
+});
+
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch {
+    res.sendStatus(403);
+  }
+}
+
+function panicMiddleware(req,res,next){
+  authenticateToken(req,res,next);
+  upload.single('audio');
+}
 
 /* uploads */
 const uploadsDir = process.env.UPLOADS_DIR || './uploads';
@@ -120,9 +212,9 @@ app.get('/health', (req, res) => {
 });
 
 /* panic */
-app.post('/panic', upload.single('audio'), async (req, res) => {
+app.post('/panic',panicMiddleware, async (req, res) => {
   try {
-    const ipAddress = req.clientIp;
+    const userId = req.userId;
 
     // const latitude = Number(req.body.latitude);
     // const longitude = Number(req.body.longitude);
@@ -147,9 +239,9 @@ app.post('/panic', upload.single('audio'), async (req, res) => {
     }
 
     await Data.findOneAndUpdate(
-      { ipAddress },
+      { userId },
       {
-        ipAddress,
+        userId,
         sessionId: uuidv4(),
         // location: { latitude, longitude },
         ...(audioEntry && { $push: { audioFiles: audioEntry } }),
@@ -183,11 +275,11 @@ app.post('/panic', upload.single('audio'), async (req, res) => {
 
 /* data (self) */
 app.get('/api/data', async (req, res) => {
-  const data = await Data.findOne({ ipAddress: req.clientIp });
+  const data = await Data.findOne({ userId: req.userId });
   if (!data) return res.status(404).json({ error: 'no data' });
 
   res.json({
-    ipAddress: data.ipAddress,
+    userId: data.userId,
     sessionId: data.sessionId,
     location: data.location,
     totalAccelerometer: data.accelerometer.length,
