@@ -99,16 +99,71 @@ const userSchema = new mongoose.Schema({
   username: String,
   passwordHash: String
 });
-
+const adminSchema = new mongoose.Schema({
+  adminId: String,
+  adminName: String,
+  passwordHash: String
+})
 
 //Indexing the data entries
 dataSchema.index({ userId: 1 });
 
 const User = mongoose.model('User', userSchema);
+const Admin = mongoose.model('Admin', adminSchema);
 const Data = mongoose.model('Data', dataSchema);
 
 app.get('/ping', (req, res) => {
   res.status(200).json({ message: 'pong' });
+});
+
+app.post('/adminlogin', authLimiter, async (req, res) => {
+  const {error} = logsignSchema.validate(req.body);
+  if (error) return res.status(400).json({ message: error.details[0].message });
+  const { username, password } = req.body;
+
+  try {
+    const admin = await Admin.findOne({ username });
+
+    if (!admin || !bcrypt.compareSync(password, admin.passwordHash)) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign({ adminId: admin.adminId }, JWT_SECRET, { expiresIn: '1d' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.post('/adminsignup', authLimiter, async (req, res) => {
+  const {error} = logsignSchema.validate(req.body);
+  if (error) return res.status(400).json({ message: error.details[0].message });
+  const { adminName, password } = req.body;
+
+  if (!adminName || !password)
+    return res.status(400).json({ message: 'adminName and password required' });
+
+  if (await Admin.findOne({ adminName }))
+    return res.status(409).json({ message: 'adminName already taken' });
+
+  const passwordHash = await bcrypt.hash(password, 8);
+  const adminId = `admin${Date.now()}`;
+
+  const newUser = new User({ adminId, adminName, passwordHash });
+  await newUser.save();
+
+  // const newTodo = new Todo({ userId: userId, tasks: {}, comptasks: {} });
+  // await newTodo.save();
+
+  const token = jwt.sign({ adminId: adminId }, JWT_SECRET, { expiresIn: '1d' });
+  res.status(201).json({ token });
+});
+
+app.get('/adminwhoami', authenticateToken, async (req, res) => {
+  const admin = await Admin.findOne({ id: req.adminId });
+  if (!admin) return res.status(404).json({ message: 'invalid token' });
+
+  res.send({ adminId: admin.id, adminName: admin.adminName });
 });
 
 app.post('/login', authLimiter, async (req, res) => {
