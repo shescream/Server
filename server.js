@@ -6,6 +6,7 @@ const fs = require("fs");
 const mongoose = require("mongoose");
 require("dotenv").config();
 const crypto = require("crypto");
+const bcrypt = require('bcryptjs');
 const { sendAudio } = require("./sender.js");
 
 // Generating a unique UUID
