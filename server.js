@@ -1,4 +1,7 @@
 const express = require("express");
+const rateLimit = require("express-rate-limit");
+const Joi = require("joi");
+const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
@@ -6,7 +9,7 @@ const fs = require("fs");
 const mongoose = require("mongoose");
 require("dotenv").config();
 const crypto = require("crypto");
-const bcrypt = require('bcryptjs');
+const bcrypt = require("bcryptjs");
 const { sendAudio } = require("./sender.js");
 
 // Generating a unique UUID
@@ -15,7 +18,7 @@ const { sendAudio } = require("./sender.js");
 
 // server init
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "example";
 app.set("trust proxy", 1);
 
@@ -53,8 +56,6 @@ mongoose
 //Schema
 const dataSchema = new mongoose.Schema({
   userId: { type: String, required: true },
-  sessionId: String,
-  score: Number,
   location: { latitude: Number, longitude: Number },
 
   //unified motion samples
@@ -239,11 +240,6 @@ function authenticateToken(req, res, next) {
   }
 }
 
-function panicMiddleware(req, res, next) {
-  authenticateToken(req, res, next);
-  upload.single("audio");
-}
-
 /* uploads */
 const uploadsDir = process.env.UPLOADS_DIR || "./uploads";
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -271,7 +267,7 @@ app.get("/health", (req, res) => {
 });
 
 /* panic */
-app.post("/panic", panicMiddleware, async (req, res) => {
+app.post("/panic", authenticateToken, upload.single("audio"), async (req, res) => {
   try {
     const userId = req.userId;
 
@@ -284,6 +280,15 @@ app.post("/panic", panicMiddleware, async (req, res) => {
     let audioEntry = null;
 
     if (req.file) {
+      sendAudio(`./uploads/${req.file.filename}`)
+        .then((res) => {
+          console.log(res);
+          dangerIndex = res.dangerIndex;
+        })
+        .catch((err) => console.log(err));
+    }
+
+    if (req.file) {
       // dangerIndex = await runDangerDetection('audio', req.file.path);
 
       audioEntry = {
@@ -292,18 +297,25 @@ app.post("/panic", panicMiddleware, async (req, res) => {
         mimeType: req.file.mimetype,
         // path: req.file.path,
         size: req.file.size,
-        dangerIndex,
+        dangerIndex:dangerIndex,
       };
+    }
+
+    const pushOps = {};
+
+    if (audioEntry) {
+      pushOps.audioFiles = audioEntry;
+    }
+
+    if (samples.length) {
+      pushOps.motionSamples = samples;
     }
 
     await Data.findOneAndUpdate(
       { userId },
       {
         userId,
-        sessionId: uuidv4(),
-        // location: { latitude, longitude },
-        ...(audioEntry && { $push: { audioFiles: audioEntry } }),
-        ...(samples.length && { $push: { motionSamples: samples } }),
+        ...(Object.keys(pushOps).length && { $push: pushOps }),
         $set: { updatedAt: new Date() },
         $setOnInsert: { createdAt: new Date() },
       },
@@ -316,16 +328,6 @@ app.post("/panic", panicMiddleware, async (req, res) => {
       audioReceived: !!req.file,
       dangerIndex: Number(dangerIndex.toFixed(2)),
     });
-
-    sendAudio(`./uploads/${req.file.filename}`)
-      .then((res) => {
-        console.log(res);
-        Data.findOneAndUpdate(
-          {userId},
-          {$set: {score: res.dangerIndex}},
-        )
-      })
-      .catch((err) => console.log(err));
 
     // delete file in 10 min
     if (req.file) {
@@ -346,7 +348,6 @@ app.get("/api/data", async (req, res) => {
 
   res.json({
     userId: data.userId,
-    sessionId: data.sessionId,
     location: data.location,
     totalAccelerometer: data.accelerometer.length,
     totalGyroscope: data.gyroscope.length,
