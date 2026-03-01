@@ -19,7 +19,8 @@ const { sendAudio } = require("./sender.js");
 // server init
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "example";
+const JWT_USER_SECRET = process.env.JWT_USER_SECRET || "example";
+const JWT_ADMIN_SECRET = process.env.JWT_ADMIN_SECRET || "axample";
 app.set("trust proxy", 1);
 
 //connetingconst cors = require("cors");
@@ -145,7 +146,7 @@ app.post("/adminlogin", authLimiter, async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ adminId: admin.adminId }, JWT_SECRET, {
+    const token = jwt.sign({ adminId: admin.adminId }, JWT_ADMIN_SECRET, {
       expiresIn: "1d",
     });
     res.json({ token });
@@ -174,12 +175,12 @@ app.post("/adminsignup", authLimiter, async (req, res) => {
   // const newTodo = new Todo({ userId: userId, tasks: {}, comptasks: {} });
   // await newTodo.save();
 
-  const token = jwt.sign({ adminId: adminId }, JWT_SECRET, { expiresIn: "1d" });
+  const token = jwt.sign({ adminId: adminId }, JWT_ADMIN_SECRET, { expiresIn: "1d" });
   res.status(201).json({ token });
 });
 
-app.get("/adminwhoami", authenticateToken, async (req, res) => {
-  const admin = await Admin.findOne({ id: req.adminId });
+app.get("/adminwhoami", authenticateAdminToken, async (req, res) => {
+  const admin = await Admin.findOne({ adminId: req.adminId });
   if (!admin) return res.status(404).json({ message: "invalid token" });
 
   res.send({ adminId: admin.id, adminName: admin.adminName });
@@ -197,7 +198,7 @@ app.post("/login", authLimiter, async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ userId: user.userId }, JWT_SECRET, {
+    const token = jwt.sign({ userId: user.userId }, JWT_USER_SECRET, {
       expiresIn: "7d",
     });
     res.json({ token });
@@ -226,25 +227,39 @@ app.post("/signup", authLimiter, async (req, res) => {
   // const newTodo = new Todo({ userId: userId, tasks: {}, comptasks: {} });
   // await newTodo.save();
 
-  const token = jwt.sign({ userId: userId }, JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ userId: userId }, JWT_USER_SECRET, { expiresIn: "7d" });
   res.status(201).json({ token });
 });
 
-app.get("/whoami", authenticateToken, async (req, res) => {
+app.get("/whoami", authenticateUserToken, async (req, res) => {
   const user = await User.findOne({ id: req.userId });
   if (!user) return res.status(404).json({ message: "invalid token" });
 
   res.send({ id: user.id, username: user.username });
 });
 
-function authenticateToken(req, res, next) {
+function authenticateUserToken(req, res, next) {
   const authHeader = req.headers["authorization"];
   const token = authHeader?.split(" ")[1];
   if (!token) return res.sendStatus(401);
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_USER_SECRET);
     req.userId = decoded.userId;
+    next();
+  } catch {
+    res.sendStatus(403);
+  }
+}
+
+function authenticateAdminToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader?.split(" ")[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    const decoded = jwt.verify(token, JWT_ADMIN_SECRET);
+    req.adminId = decoded.adminId;
     next();
   } catch {
     res.sendStatus(403);
@@ -278,7 +293,7 @@ app.get("/health", (req, res) => {
 });
 
 /* panic */
-app.post("/panic", authenticateToken, upload.single("audio"), async (req, res) => {
+app.post("/panic", authenticateUserToken, upload.single("audio"), async (req, res) => {
   try {
     const userId = req.userId;
 
@@ -351,41 +366,40 @@ app.post("/panic", authenticateToken, upload.single("audio"), async (req, res) =
 });
 
 /* data (self) */
-app.get("/api/data", async (req, res) => {
-  const data = await Data.findOne({ userId: req.userId });
-  if (!data) return res.status(404).json({ error: "no data" });
+app.post("/admin/data", authenticateAdminToken,async (req, res) => {
+  // console.log(req.body)
+  const data = await Data.findOne({ userId: req.body.userId });
+  if (!data) return res.status(404).json({ message: "no data" });
 
   res.json({
     userId: data.userId,
     location: data.location,
-    totalAccelerometer: data.accelerometer.length,
-    totalGyroscope: data.gyroscope.length,
-    totalAudio: data.audioFiles.length,
-    latestDanger: data.audioFiles.at(-1)?.dangerIndex || 0,
+    score: data.score,
     updatedAt: data.updatedAt,
+    createdAt: data.createdAt
   });
 });
 
 /* stream audio */
-app.get("/audio/:filename", async (req, res) => {
-  try {
-    const file = await gfs.files.findOne({ filename: req.params.filename });
+// app.get("/audio/:filename", async (req, res) => {
+//   try {
+//     const file = await gfs.files.findOne({ filename: req.params.filename });
 
-    if (!file) {
-      return res.status(404).json({ message: "File not found" });
-    }
+//     if (!file) {
+//       return res.status(404).json({ message: "File not found" });
+//     }
 
-    //set correct content type
-    res.set("Content-Type", file.contentType);
+//     //set correct content type
+//     res.set("Content-Type", file.contentType);
 
-    const readStream = gfs.createReadStream(file.filename);
-    readStream.pipe(res);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+//     const readStream = gfs.createReadStream(file.filename);
+//     readStream.pipe(res);
+//   } catch (err) {
+//     res.status(500).json({ error: err.message });
+//   }
+// });
 
-app.get("/admin/users", authenticateToken, async (req, res) => {
+app.get("/admin/users", authenticateAdminToken, async (req, res) => {
   const users = await Data.find({}, { userId: 1, score: 1, _id: 0 })
     .sort({ score: -1 });
 
