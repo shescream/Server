@@ -10,7 +10,7 @@ async function sendAudio(filePath) {
   const form = new FormData();
   form.append("file", blob, "audio.m4a");
 
-  const response = await fetch("https://bb.246897.xyz/predict", {
+  const response = await fetch("http://localhost:5000/predict", {
     method: "POST",
     body: form
   });

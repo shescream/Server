@@ -22,8 +22,14 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "example";
 app.set("trust proxy", 1);
 
-//conneting
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+//connetingconst cors = require("cors");
+
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
@@ -56,6 +62,7 @@ mongoose
 //Schema
 const dataSchema = new mongoose.Schema({
   userId: { type: String, required: true },
+  score: Number,
   location: { latitude: Number, longitude: Number },
 
   //unified motion samples
@@ -100,6 +107,10 @@ const logsignSchema = Joi.object({
   username: Joi.string().alphanum().min(3).max(30).required(),
   password: Joi.string().min(6).max(128).required(),
 });
+const AdminLoginSchema = Joi.object({
+  adminName: Joi.string().alphanum().min(3).max(30).required(),
+  password: Joi.string().min(6).max(128).required(),
+})
 const userSchema = new mongoose.Schema({
   userId: String,
   username: String,
@@ -123,12 +134,12 @@ app.get("/ping", (req, res) => {
 });
 
 app.post("/adminlogin", authLimiter, async (req, res) => {
-  const { error } = logsignSchema.validate(req.body);
+  const { error } = AdminLoginSchema.validate(req.body);
   if (error) return res.status(400).json({ message: error.details[0].message });
-  const { username, password } = req.body;
+  const { adminName, password } = req.body;
 
   try {
-    const admin = await Admin.findOne({ username });
+    const admin = await Admin.findOne({ adminName });
 
     if (!admin || !bcrypt.compareSync(password, admin.passwordHash)) {
       return res.status(401).json({ message: "Invalid credentials" });
@@ -144,7 +155,7 @@ app.post("/adminlogin", authLimiter, async (req, res) => {
 });
 
 app.post("/adminsignup", authLimiter, async (req, res) => {
-  const { error } = logsignSchema.validate(req.body);
+  const { error } = AdminLoginSchema.validate(req.body);
   if (error) return res.status(400).json({ message: error.details[0].message });
   const { adminName, password } = req.body;
 
@@ -157,8 +168,8 @@ app.post("/adminsignup", authLimiter, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 8);
   const adminId = `admin${Date.now()}`;
 
-  const newUser = new User({ adminId, adminName, passwordHash });
-  await newUser.save();
+  const newAdmin = new Admin({ adminId, adminName, passwordHash });
+  await newAdmin.save();
 
   // const newTodo = new Todo({ userId: userId, tasks: {}, comptasks: {} });
   // await newTodo.save();
@@ -276,20 +287,17 @@ app.post("/panic", authenticateToken, upload.single("audio"), async (req, res) =
     // parse incoming JSON
     const samples = JSON.parse(req.body.samples || "[]");
 
-    let dangerIndex = 0;
+    var dangerIndex = 0;
     let audioEntry = null;
 
     if (req.file) {
-      sendAudio(`./uploads/${req.file.filename}`)
-        .then((res) => {
-          console.log(res);
-          dangerIndex = res.dangerIndex;
-        })
-        .catch((err) => console.log(err));
-    }
-
-    if (req.file) {
-      // dangerIndex = await runDangerDetection('audio', req.file.path);
+      try {
+        const audioResult = await sendAudio(`./uploads/${req.file.filename}`);
+        console.log(audioResult);
+        dangerIndex = audioResult.confidence_score;
+      } catch (err) {
+        console.log(err);
+      }
 
       audioEntry = {
         filename: req.file.originalname,
@@ -297,7 +305,7 @@ app.post("/panic", authenticateToken, upload.single("audio"), async (req, res) =
         mimeType: req.file.mimetype,
         // path: req.file.path,
         size: req.file.size,
-        dangerIndex:dangerIndex,
+        dangerIndex: dangerIndex,
       };
     }
 
@@ -315,6 +323,7 @@ app.post("/panic", authenticateToken, upload.single("audio"), async (req, res) =
       { userId },
       {
         userId,
+        score: dangerIndex,
         ...(Object.keys(pushOps).length && { $push: pushOps }),
         $set: { updatedAt: new Date() },
         $setOnInsert: { createdAt: new Date() },
@@ -374,6 +383,13 @@ app.get("/audio/:filename", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get("/admin/users", authenticateToken, async (req, res) => {
+  const users = await Data.find({}, { userId: 1, score: 1, _id: 0 })
+    .sort({ score: -1 });
+
+  res.json(users);
 });
 
 /* start */
